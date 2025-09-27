@@ -18,13 +18,14 @@ pip3 install spice-bio
 
 ## SOMA
 
-Here is a simple example of how to use **SOMA**:
+Here is a simple example of how to use **SOMA** to train a model and predict PSI values:
 
 ```python
 from SPICE import Soma
 import pandas as pd
 
 df_train = pd.read_csv('path/to/your/df_data') # df contains columns 'psi'(ratio) and 'seq'
+
 # train SOMA models, after training, the model parameters will be saved as 'SOMA_params_seed_0.pth', 'SOMA_params_seed_1.pth', etc.
 Soma.train(
     df_train,    # pandas DataFrame with columns 'psi' and 'seq'
@@ -36,6 +37,7 @@ Soma.train(
 )
 
 df_test = pd.read_csv('path/to/your/df_test_data') # df_test contains column 'seq'
+
 # predict PSI values using a trained SOMA model
 pred_psi = Soma.predict(
     df_test,   # pandas DataFrame with column 'seq'
@@ -45,16 +47,18 @@ pred_psi = Soma.predict(
 ```
 
 ## Melange
-Here is a simple example of how to use **Melange** to generate sequences with desired PSI values:
+Here is a simple example of how to use **Melange** and **SOMA** to generate sequences with desired PSI values:
 
 ```python
 from SPICE import Melange
 import pandas as pd
 
 df_train = pd.read_csv('path/to/your/df_data') # df contains columns 'psi'(ratio) and 'seq'
+
 Melange.train(
     df_train,    # pandas DataFrame with columns 'psi' and 'seq'
     device='cuda',    # 'cuda' or 'cpu'
+    lambda_cls=5.0,   # weight for the classification loss, use to control the trade-off between reconstruction and classification accuracy
     max_len=250,    # maximum sequence length
     epochs=10,      # number of training epochs
     clf_ids=[0,1,2,3,4,5,6,7,8],    # indices of the SOMA models to use as teachers
@@ -63,14 +67,15 @@ Melange.train(
 )
 
 df_test = pd.read_csv('path/to/your/df_test_data') # df_test contains column 'seq'
+
 gen_seq_psi_pred, org_seq_psi_pred = Melange.evaluate_reconstructions(
     df_test,    # pandas DataFrame with column 'seq'
-    clf_id=2,    # index of the SOMA model to use for evaluation
+    clf_id=9,    # index of the SOMA model to use for evaluation
     device='cuda',    # 'cuda' or 'cpu' 
     max_len=250,    # maximum sequence length
 )
 
-# visualize a parent and generated sequence using a trained Melange model
+# visualize any parent and generated sequence using a trained Melange model
 Melange.reconstruct_sequence(
     df_test.iloc[0]['seq'],    # input sequence
     max_len=250,    # maximum sequence length

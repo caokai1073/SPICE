@@ -189,10 +189,10 @@ class OneHotBarcodeDataset(Dataset):
     '''
     Dataset for one-hot encoded DNA sequences and optional PSI labels
     '''
-    def __init__(self, df, max_len=250, train=True):
+    def __init__(self, df, max_len=250):
         self.inputs = [one_hot_encode(seq, max_len) for seq in df['seq']]
         self.seqs = df['seq'].values
-        if train:
+        if 'psi' in df.columns:
             self.labels = df['psi'].values.astype('float32') 
 
     def __len__(self):
@@ -208,9 +208,8 @@ class OneHotBarcodeGEXDataset(Dataset):
     '''
     Dataset for one-hot encoded DNA sequences with gene expression data and optional PSI labels
     '''
-    def __init__(self, df, GX_dict, max_len=250, train=True):
+    def __init__(self, df, GX_dict, max_len=250):
         self.samples = []
-        self.train = train
 
         for barcode in df.index:
 
@@ -219,27 +218,18 @@ class OneHotBarcodeGEXDataset(Dataset):
             for celltype in df.columns:
                 if celltype not in GX_dict:
                     continue
-
                 gx_array = GX_dict[celltype]
-                
-                if train:
-                    psi_value = df.loc[barcode, celltype]
-                
-                    if not np.isnan(psi_value):
-                        self.samples.append((celltype, barcode, barcode_array, gx_array, psi_value))
-                else:   
-                    self.samples.append((celltype, barcode, barcode_array, gx_array)) 
+                psi_value = df.loc[barcode, celltype]
+            
+                if not np.isnan(psi_value):
+                    self.samples.append((celltype, barcode, barcode_array, gx_array, psi_value))
     
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        if self.train:
-            celltype, barcode, barcode_array, gx_array, psi_value = self.samples[idx]
-            return celltype, barcode, torch.tensor(barcode_array), torch.tensor(gx_array), torch.tensor(psi_value, dtype=torch.float32)
-        else:
-            celltype, barcode, barcode_array, gx_array = self.samples[idx]
-            return celltype, barcode, torch.tensor(barcode_array), torch.tensor(gx_array)
+        celltype, barcode, barcode_array, gx_array, psi_value = self.samples[idx]
+        return celltype, barcode, torch.tensor(barcode_array), torch.tensor(gx_array), torch.tensor(psi_value, dtype=torch.float32)
 
 def train(
     df,
@@ -271,7 +261,7 @@ def train(
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-        dataset = OneHotBarcodeDataset(df, max_len=max_len, train=True)
+        dataset = OneHotBarcodeDataset(df, max_len=max_len)
 
         train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -279,20 +269,23 @@ def train(
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        for epoch in range(epochs):
-            model.train()
-            train_loss = 0.0
-            for x, _, y in tqdm(train_loader):
-                x, y = x.to(device), y.to(device)
-                pred = model(x).squeeze(1) 
-                loss = loss_fn(pred, y)
+        with tqdm(range(epochs), desc="Training", unit="epoch", dynamic_ncols=True) as pbar:
+            for epoch in pbar:
+                model.train()
+                train_loss = 0.0
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
+                for x, _, y in train_loader:
+                    x, y = x.to(device), y.to(device)
+                    pred = model(x).squeeze(1)
+                    loss = loss_fn(pred, y)
 
-            print(f"Epoch {epoch+1} | Train Loss: {train_loss / len(train_loader):.4f}")
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item()
+
+                avg_loss = train_loss / len(train_loader)
+                pbar.set_postfix(train_loss=f"{avg_loss:.4f}")
 
         print(f"Training completed for seed {seed}. Saving model...")
         torch.save(model.state_dict(), f'SOMA_params_seed_{seed}.pth')  # Save the model for each seed
@@ -316,7 +309,7 @@ def predict(df, device, max_len=250, batch_size=256, params=None):
     model.eval()
     all_preds = []
     with torch.no_grad():
-        for x, _ in loader:
+        for x, _ in tqdm(loader):
             x = x.to(device)
             pred = model(x).squeeze(1)
             all_preds.extend(pred.cpu().numpy())
@@ -327,7 +320,7 @@ def fintune_with_gex(
     df,
     gex_dict,
     device,
-    pretrained_model_path,
+    pretrained_params,
     epochs=100,
     learning_rate=1e-4,
     batch_size=256,
@@ -347,45 +340,54 @@ def fintune_with_gex(
     SOMA_GEX = SOMA_GEX.to(device)
 
     SOMA_pretrained = SOMA().to(device)
-    SOMA_pretrained.load_state_dict(torch.load(pretrained_model_path))
+    SOMA_pretrained.load_state_dict(torch.load(pretrained_params))
     SOMA_pretrained.eval()
 
     MSELoss = nn.MSELoss()
     optimizer = torch.optim.Adam(SOMA_GEX.parameters(), lr=learning_rate)
     
     train_loader = DataLoader(
-        OneHotBarcodeGEXDataset(df, gex_dict, train=True), 
+        OneHotBarcodeGEXDataset(df, gex_dict), 
         batch_size=batch_size, 
         shuffle=True
     )
 
     for epoch in range(epochs):
+        epoch_loss = 0.0
 
-        for _, _, barcode, gx, psi in tqdm(train_loader):
+        with tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", unit="batch", dynamic_ncols=True) as pbar:
+            for _, _, barcode, gx, psi in pbar:
+                barcode = barcode.to(device).float()
+                gx = gx.to(device).float()
+                psi = psi.to(device).float()
 
-            barcode = barcode.to(device).float()
-            gx = gx.to(device).float()
-            psi = psi.to(device).float()
-            
-            optimizer.zero_grad()
-            
-            condition = SOMA_pretrained.Barcode_model(barcode).detach()
-            psi_pretrain = SOMA_pretrained(barcode).detach()
-            
-            psi_residual = SOMA_GEX(barcode, gx, condition)
-            
-            psi_loss = MSELoss(psi_residual.squeeze(), psi-psi_pretrain.squeeze())
-            
-            psi_loss.backward()
-            optimizer.step()
-            
-        print(f"Epoch {epoch}, Loss: {psi_loss.item()}")
-    
+                optimizer.zero_grad()
+
+                condition = SOMA_pretrained.Barcode_model(barcode).detach()
+                psi_pretrain = SOMA_pretrained(barcode).detach()
+
+                psi_residual = SOMA_GEX(barcode, gx, condition)
+                psi_loss = MSELoss(psi_residual.squeeze(), psi - psi_pretrain.squeeze())
+
+                psi_loss.backward()
+                optimizer.step()
+
+                epoch_loss += psi_loss.item()
+
+                pbar.set_postfix(loss=f"{psi_loss.item():.4f}")
+
     print("Fine-tuning completed. Saving model...")
-    torch.save(SOMA_GEX.state_dict(), f'SOMA_with_GEX_params.pth')
+    torch.save(SOMA_GEX.state_dict(), "SOMA_with_GEX_params.pth")
 
 
-def predict_with_gex(df, gex_dict, device, batch_size=256, params=None):
+def predict_with_gex(
+    df, 
+    gex_dict, 
+    device, 
+    pretrained_params,
+    pretrained_GEX_params,
+    batch_size=256, 
+):
     '''
     Predict with fine-tuned SOMA model using gene expression data
     df: DataFrame with 'seq' column, indexed by barcode
@@ -394,27 +396,35 @@ def predict_with_gex(df, gex_dict, device, batch_size=256, params=None):
     batch_size: Batch size for prediction (default 256)
     params: Path to the fine-tuned model parameters
     '''
-    assert params is not None, "Model parameters must be provided for evaluation."
+    assert pretrained_params is not None, "pretrained_params must be provided for evaluation."
+    assert pretrained_GEX_params is not None, "pretrained_GEX_params must be provided for evaluation."
 
+    SOMA_pretrained = SOMA().to(device)
+    SOMA_pretrained.load_state_dict(torch.load(pretrained_params))
+    SOMA_pretrained.eval()
+    
     gex_dim = list(gex_dict.values())[0].shape[0]
     SOMA_GEX = SOMA_with_GEX(gex_dim)
     SOMA_GEX = SOMA_GEX.to(device)
-    SOMA_GEX.load_state_dict(torch.load(params))
+    SOMA_GEX.load_state_dict(torch.load(pretrained_GEX_params))
     SOMA_GEX.eval()
 
-    dataset = OneHotBarcodeGEXDataset(df, gex_dict, train=False)
+    dataset = OneHotBarcodeGEXDataset(df, gex_dict)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     all_preds = []
     with torch.no_grad():
-        for _, _, barcode, gx in loader:
+        all_psi = []
+        for _, _, barcode, gx, psi in tqdm(loader):
             barcode = barcode.to(device).float()
             gx = gx.to(device).float()
             
-            condition = SOMA_GEX.Barcode_model(barcode).detach()
-            pred = SOMA_GEX(barcode, gx, condition).squeeze(1)
+            condition = SOMA_pretrained.Barcode_model(barcode).detach()
+            psi_residual = SOMA_GEX(barcode, gx, condition).squeeze(1)
+            pred = SOMA_pretrained(barcode).squeeze(1) + psi_residual
             all_preds.extend(pred.cpu().numpy())
-            
-    return np.array(all_preds)  
-    
+            all_psi.extend(psi.numpy())
+        
+        return np.array(all_preds), np.array(all_psi)
+
     
