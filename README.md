@@ -74,6 +74,7 @@ gen_seq_psi_pred, org_seq_psi_pred = Melange.evaluate_reconstructions(
     clf_id=9,    # index of the SOMA model to use for evaluation
     device='cuda',    # 'cuda' or 'cpu' 
     max_len=250,    # maximum sequence length
+    params='Melange_params.pth'   # path to the trained Melange model parameters
 )
 
 # visualize any parent and generated sequence using a trained Melange model

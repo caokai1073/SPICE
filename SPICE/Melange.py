@@ -58,7 +58,7 @@ class OneHotSeqVAE(nn.Module):
         return logits, mu, logvar
 
 # ==== Load Classifiers ====
-def load_classifiers(model_dir, seeds_id=[0,1,2,3,4,5,6,7,8], device='cuda'):
+def load_classifiers(model_dir, seeds_id, device):
     classifiers = []
     for seed in seeds_id:
         model = SOMA().to(device)
@@ -107,7 +107,7 @@ def train(
     if clf_ids is None:
         raise ValueError("Please provide clf_seeds_id for loading classifiers.")
 
-    classifiers = load_classifiers(model_dir='./', device=device, seeds_id=clf_ids)
+    classifiers = load_classifiers(model_dir='./', seeds_id=clf_ids, device=device)
 
     dataset = OneHotBarcodeDataset(df, max_len=max_len)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -126,9 +126,9 @@ def train(
             epoch_cls = 0.0
             epoch_kl = 0.0
 
-            for step, (inputs, _, labels) in enumerate(dataloader):
+            for step, (inputs, _, psi) in enumerate(dataloader):
                 inputs = inputs.to(device)
-                labels = labels.to(device)
+                psi = psi.to(device)
 
                 optimizer.zero_grad()
 
@@ -139,11 +139,11 @@ def train(
 
                 # 根据 mode 筛选索引
                 if mode in ['PSI0to1', 'PSI0to0.5']:
-                    zero_indices = (labels < -3.17).nonzero(as_tuple=True)[0]
+                    zero_indices = (psi < -3.17).nonzero(as_tuple=True)[0]
                 elif mode in ['PSI1to0', 'PSI1to0.5']:
-                    zero_indices = (labels > 3.17).nonzero(as_tuple=True)[0]
+                    zero_indices = (psi > 3.17).nonzero(as_tuple=True)[0]
                 else:
-                    zero_indices = torch.logical_and(labels > -2, labels < 2).nonzero(as_tuple=True)[0]
+                    zero_indices = torch.logical_and(psi > -2, psi < 2).nonzero(as_tuple=True)[0]
 
                 if len(zero_indices) > 0:
                     input_seq = inputs[zero_indices]
@@ -156,7 +156,8 @@ def train(
                         originals_list.append(clf(input_seq))
 
                     preds_mean = torch.stack(preds_list, dim=0).mean(0)
-
+                    originals_mean = torch.stack(originals_list, dim=0).mean(0)
+                    
                     if mode in ['PSI0to1', 'PSI0.5to1']:
                         target = max_psi * torch.ones_like(preds_mean)
                     elif mode in ['PSI1to0', 'PSI0.5to0']:
@@ -168,7 +169,6 @@ def train(
                 else:
                     loss_cls = torch.tensor(0.0, device=device)
 
-                # Loss 合并
                 lambda_recon = 1.0
                 lambda_kl = 0.005
 
@@ -179,13 +179,11 @@ def train(
                 loss_recon_all.append(loss_recon.item())
                 loss_cls_all.append(loss_cls.item())
 
-                # 统计epoch损失
                 epoch_loss += loss.item()
                 epoch_recon += loss_recon.item()
                 epoch_cls += loss_cls.item()
                 epoch_kl += kl.item()
 
-            # 每个 epoch 结束后更新进度条右侧显示
             avg_loss = epoch_loss / len(dataloader)
             avg_recon = epoch_recon / len(dataloader)
             avg_cls = epoch_cls / len(dataloader)
@@ -203,7 +201,7 @@ def train(
     print("Training completed.")
     torch.save(model.state_dict(), save_path)
 
-def evaluate_reconstructions(df, clf_id, max_len=250, device='cuda'):
+def evaluate_reconstructions(df, clf_id, max_len=250, device='cuda', params=None):
     """
     Evaluate reconstruction performance across all PSI < 0.1 samples using two classifiers.
 
@@ -219,6 +217,10 @@ def evaluate_reconstructions(df, clf_id, max_len=250, device='cuda'):
     """
     
     model = OneHotSeqVAE(input_channels=4, max_len=max_len, hidden_dim=128, num_layers=3, num_heads=8).to(device)
+    if params is not None:
+        model.load_state_dict(torch.load(params, map_location=device))
+    else:
+        raise ValueError("Please provide model params for the trained Melange model.")
     
     dataset = OneHotBarcodeDataset(df, max_len=max_len)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
@@ -235,7 +237,7 @@ def evaluate_reconstructions(df, clf_id, max_len=250, device='cuda'):
     originals_barcode = []
 
     with torch.no_grad():
-        for inputs, seqs, labels in dataloader:
+        for inputs, seqs, labels in tqdm(dataloader):
             inputs = inputs.to(device)
             labels = labels.to(device)
 
