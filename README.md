@@ -15,9 +15,10 @@ Install **spice-bio** via pip:
 ```bash
 pip3 install spice-bio
 ```
+## Examples
+Detailed documentation for **SOMA** and **Melange** can be found at folder `examples`.
 
 ## SOMA
-
 Here is a simple example of how to use **SOMA** to train a model and predict PSI values:
 
 ```python
@@ -33,7 +34,7 @@ Soma.train(
     epochs=1,    # number of training epochs
     batch_size=512,    # batch size
     learning_rate=1e-4,    # learning rate
-    num_seeds=10    # number of SOMA models to train
+    num_seeds=10    # number of SOMA models to train with different random initializations
 )
 
 df_test = pd.read_csv('path/to/your/df_test_data') # df_test contains column 'seq'
@@ -82,3 +83,4 @@ Melange.reconstruct_sequence(
     device='cuda',    # 'cuda' or 'cpu'
     params='Melange_params.pth'    # path to the trained Melange model parameters
 )
+```

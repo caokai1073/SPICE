@@ -118,67 +118,87 @@ def train(
     
     classifiers = [clf.eval() for clf in classifiers]
 
-    for epoch in range(epochs):
-        for step, (inputs, _, labels) in tqdm(enumerate(dataloader)):
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            
-            optimizer.zero_grad()
-            
-            # Forward pass
-            outputs, mu, logvar = model(inputs)
-            loss_recon = criterion_recon(outputs, inputs)
-            kl = kl_loss(mu, logvar)
+    with tqdm(range(epochs), desc="Training", unit="epoch", dynamic_ncols=True) as pbar:
+        for epoch in pbar:
+            model.train()
+            epoch_loss = 0.0
+            epoch_recon = 0.0
+            epoch_cls = 0.0
+            epoch_kl = 0.0
 
-            if mode == 'PSI0to1' or mode == 'PSI0to0.5':
-                zero_indices = (labels < -3.17).nonzero(as_tuple=True)[0]
-            elif mode == 'PSI1to0' or mode == 'PSI1to0.5':
-                zero_indices = (labels > 3.17).nonzero(as_tuple=True)[0]
-            else:
-                zero_indices = torch.logical_and(labels > -2, labels < 2).nonzero(as_tuple=True)[0]
+            for step, (inputs, _, labels) in enumerate(dataloader):
+                inputs = inputs.to(device)
+                labels = labels.to(device)
 
-            if len(zero_indices) > 0:
-                input_seq = inputs[zero_indices]
-                decoded_seq = torch.sigmoid(outputs[zero_indices])
+                optimizer.zero_grad()
 
-                preds_list = []
-                originals_list = []
-                for clf in classifiers:
-                    preds = clf(decoded_seq)
-                    originals = clf(input_seq)
-                    preds_list.append(preds)
-                    originals_list.append(originals)
+                # Forward pass
+                outputs, mu, logvar = model(inputs)
+                loss_recon = criterion_recon(outputs, inputs)
+                kl = kl_loss(mu, logvar)
 
-                preds_mean = torch.stack(preds_list, dim=0).mean(0)
-
-                if mode == 'PSI0to1' or mode == 'PSI0.5to1':
-                    target = max_psi*torch.ones_like(preds_mean)
-                elif mode == 'PSI1to0' or mode == 'PSI0.5to0':
-                    target = min_psi*torch.ones_like(preds_mean)
+                # 根据 mode 筛选索引
+                if mode in ['PSI0to1', 'PSI0to0.5']:
+                    zero_indices = (labels < -3.17).nonzero(as_tuple=True)[0]
+                elif mode in ['PSI1to0', 'PSI1to0.5']:
+                    zero_indices = (labels > 3.17).nonzero(as_tuple=True)[0]
                 else:
-                    target = torch.zeros_like(preds_mean)
-                    
-                loss_cls = criterion_cls(preds_mean, target)
-                
-            else:
-                loss_cls = torch.tensor(0.0, device=device)
-                preds_mean = torch.zeros((1,), device=device)
+                    zero_indices = torch.logical_and(labels > -2, labels < 2).nonzero(as_tuple=True)[0]
 
-            # Dynamic weighting
-            lambda_recon = 1.0 #if loss_recon > 0.2 else 0.0
-            lambda_kl = 0.005 #if kl > 0.2 else 0.0005
+                if len(zero_indices) > 0:
+                    input_seq = inputs[zero_indices]
+                    decoded_seq = torch.sigmoid(outputs[zero_indices])
 
-            loss = lambda_recon * loss_recon + lambda_cls * loss_cls + lambda_kl * kl
-            loss.backward()
-            optimizer.step()
+                    preds_list = []
+                    originals_list = []
+                    for clf in classifiers:
+                        preds_list.append(clf(decoded_seq))
+                        originals_list.append(clf(input_seq))
 
-            loss_recon_all.append(loss_recon.item())
-            loss_cls_all.append(loss_cls.item())
+                    preds_mean = torch.stack(preds_list, dim=0).mean(0)
 
-            if step % 100 == 0:
-                print(f"Epoch {epoch+1}, Step {step}, Loss: {loss.item():.4f}, Recon Loss: {loss_recon.item():.4f}, Classifier Loss: {loss_cls.item():.4f}, KL Loss: {kl.item():.4f}")
-                # print("Preds mean (first 5):", [f"{x:.4f}" for x in preds_mean[:5].detach().cpu().view(-1).tolist()])
-                # print("Originals mean (first 5):", [f"{x:.4f}" for x in originals_mean[:5].detach().cpu().view(-1).tolist()])
+                    if mode in ['PSI0to1', 'PSI0.5to1']:
+                        target = max_psi * torch.ones_like(preds_mean)
+                    elif mode in ['PSI1to0', 'PSI0.5to0']:
+                        target = min_psi * torch.ones_like(preds_mean)
+                    else:
+                        target = torch.zeros_like(preds_mean)
+
+                    loss_cls = criterion_cls(preds_mean, target)
+                else:
+                    loss_cls = torch.tensor(0.0, device=device)
+
+                # Loss 合并
+                lambda_recon = 1.0
+                lambda_kl = 0.005
+
+                loss = lambda_recon * loss_recon + lambda_cls * loss_cls + lambda_kl * kl
+                loss.backward()
+                optimizer.step()
+
+                loss_recon_all.append(loss_recon.item())
+                loss_cls_all.append(loss_cls.item())
+
+                # 统计epoch损失
+                epoch_loss += loss.item()
+                epoch_recon += loss_recon.item()
+                epoch_cls += loss_cls.item()
+                epoch_kl += kl.item()
+
+            # 每个 epoch 结束后更新进度条右侧显示
+            avg_loss = epoch_loss / len(dataloader)
+            avg_recon = epoch_recon / len(dataloader)
+            avg_cls = epoch_cls / len(dataloader)
+            avg_kl = epoch_kl / len(dataloader)
+
+            pbar.set_postfix({
+                "loss": f"{avg_loss:.4f}",
+                "recon": f"{avg_recon:.4f}",
+                "cls": f"{avg_cls:.4f}",
+                "kl": f"{avg_kl:.4f}",
+            })
+
+        pbar.set_postfix({"loss": f"{avg_loss:.4f}", "recon": f"{avg_recon:.4f}", "cls": f"{avg_cls:.4f}"})
 
     print("Training completed.")
     torch.save(model.state_dict(), save_path)
